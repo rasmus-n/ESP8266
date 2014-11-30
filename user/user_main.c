@@ -6,14 +6,18 @@
 #include "espconn.h"
 
 #define MY_LED 14
+#define MY_INPUT 12
 
 ETSTimer my_timer;
+ETSTimer my_debounce_timer;
 
 struct espconn my_conn;
 esp_tcp my_tcp;
-
+uint32_t input_count = 0;
 
 void ICACHE_FLASH_ATTR my_timer_cb(void *arg);
+LOCAL void input_intr_handler(void *arg);
+void ICACHE_FLASH_ATTR my_debounce_timer_cb(void *arg);
 
 //extern uint8_t at_wifiMode;
 
@@ -22,6 +26,8 @@ my_recv_cb(void *arg, char *pusrdata, unsigned short length)
 {
   char cn[3] = {0,0,0};
   int8_t n;
+  char temp[8];
+  struct espconn *pesp_conn = arg;
 
 //  uart0_sendStr("Data: ");
 //  uart0_tx_buffer(pusrdata, length);
@@ -31,6 +37,16 @@ my_recv_cb(void *arg, char *pusrdata, unsigned short length)
     if (0 == os_memcmp(pusrdata, "UART:", 5))
     {
       uart0_tx_buffer(pusrdata+5, length-5);
+    }
+  }
+
+  if(length >= 6)
+  {
+    if (0 == os_memcmp(pusrdata, "COUNT?", 6))
+    {
+      os_sprintf(temp, "%d\r\n", input_count);
+      uart0_sendStr(temp);
+      espconn_sent(pesp_conn, temp, os_strlen(temp));
     }
   }
 
@@ -70,24 +86,35 @@ void user_init(void)
   char temp[64];
   struct station_config ap_data;
 
-  wifi_set_opmode(STATION_MODE);
-  os_sprintf(ap_data.ssid, "gFQtc9kU");
-  os_sprintf(ap_data.password, "h0ppeHest");
-  wifi_station_set_config(&ap_data);
-//  wifi_station_ap_change(0);
-//  wifi_station_connect();
+//  wifi_set_opmode(STATION_MODE);
+//  os_sprintf(ap_data.ssid, "yourSSID");
+//  os_sprintf(ap_data.password, "yourPASSWD");
+//  wifi_station_set_config(&ap_data);
 
   my_conn.type = ESPCONN_INVALID;
 
   gpio_init();
   uart_init(BIT_RATE_115200, BIT_RATE_115200);
-//  at_wifiMode = wifi_get_opmode();
   uart0_sendStr("Hello world!\r\n");
 
   PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTMS_U, FUNC_GPIO14);
+  PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDI_U, FUNC_GPIO12);
+
+  PIN_PULLUP_EN(PERIPHS_IO_MUX_MTDI_U);
+
+  ETS_GPIO_INTR_DISABLE();
+  ETS_GPIO_INTR_ATTACH(input_intr_handler, NULL);
+  GPIO_DIS_OUTPUT(MY_INPUT);
+  gpio_pin_intr_state_set(GPIO_ID_PIN(MY_INPUT), GPIO_PIN_INTR_NEGEDGE);
+
+  ETS_GPIO_INTR_ENABLE();
+
   os_timer_disarm(&my_timer);
   os_timer_setfn(&my_timer, &my_timer_cb, 0);
-  os_timer_arm(&my_timer, 500, TRUE);
+  os_timer_arm(&my_timer, 250, TRUE);
+
+  os_timer_disarm(&my_debounce_timer);
+  os_timer_setfn(&my_debounce_timer, &my_debounce_timer_cb, 0);
 }
 
 void ICACHE_FLASH_ATTR
@@ -116,7 +143,27 @@ my_timer_cb(void *arg)
     os_timer_disarm(&my_timer);
     GPIO_OUTPUT_SET(MY_LED, 0);
   }
+}
 
+void ICACHE_FLASH_ATTR
+my_debounce_timer_cb(void *arg)
+{
+  ETS_GPIO_INTR_DISABLE();
+  gpio_pin_intr_state_set(GPIO_ID_PIN(MY_INPUT), GPIO_PIN_INTR_NEGEDGE);
+  ETS_GPIO_INTR_ENABLE();
+}
 
+LOCAL void
+input_intr_handler(void *arg)
+{
+  uint32 gpio_status = GPIO_REG_READ(GPIO_STATUS_ADDRESS);
 
+  input_count++;
+  GPIO_REG_WRITE(GPIO_STATUS_W1TC_ADDRESS, gpio_status);
+
+  ETS_GPIO_INTR_DISABLE();
+  gpio_pin_intr_state_set(GPIO_ID_PIN(MY_INPUT), GPIO_PIN_INTR_DISABLE);
+  ETS_GPIO_INTR_ENABLE();
+
+  os_timer_arm(&my_debounce_timer, 200, FALSE);
 }
